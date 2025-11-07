@@ -1,4 +1,4 @@
-# app.py
+# full safe app.py — uses SHAP if available, otherwise shows fallback contributions
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,8 +6,6 @@ import requests
 import joblib
 import os
 from datetime import datetime, timezone
-from sklearn.preprocessing import MinMaxScaler
-import shap
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="GitHub Activity Signal", layout="wide")
@@ -127,11 +125,12 @@ if analyze_btn:
         st.text_area("Recruiter note", note, height=90)
         st.download_button("Download note (txt)", note, file_name=f"{username}_note.txt")
 
-        # ---- SHAP explainability section ----
+        # SHAP / fallback explainability
         show_shap = st.sidebar.checkbox("Show SHAP explainability", value=False)
         if show_shap:
-            st.subheader("🔍 Model Explainability (SHAP)")
+            st.subheader("🔍 Model Explainability (SHAP / fallback)")
             try:
+                import shap
                 @st.cache_resource
                 def _get_explainer(m):
                     try:
@@ -142,8 +141,33 @@ if analyze_btn:
                 shap_values = explainer(features_df)
                 fig, ax = plt.subplots(figsize=(6,3))
                 shap.plots.bar(shap_values[0], show=False, max_display=8)
+                plt.tight_layout()
                 st.pyplot(fig)
-                st.caption("SHAP shows which features influenced the prediction most.")
-            except Exception as e:
-                st.warning(f"Explainability not available: {e}")
+            except Exception as shap_err:
+                st.warning("SHAP unavailable — showing fallback approximation.")
+                try:
+                    # get feature names & importances if possible
+                    feat_names = list(features_df.columns)
+                    if hasattr(model, "feature_importances_"):
+                        importances = model.feature_importances_
+                    elif hasattr(model, "coef_"):
+                        importances = np.abs(model.coef_).ravel()
+                    else:
+                        importances = np.ones(len(feat_names))
+                    imp = np.array(importances, dtype=float)
+                    imp = imp / (imp.sum() + 1e-9)
+
+                    vals = features_df.iloc[0].values.astype(float)
+                    norm_vals = (vals - np.min(vals)) / (np.ptp(vals) + 1e-9)
+                    contrib = imp * norm_vals
+                    contrib_df = pd.DataFrame({"feature": feat_names, "contrib": contrib})
+                    contrib_df = contrib_df.sort_values("contrib", ascending=False).head(8)
+
+                    fig, ax = plt.subplots(figsize=(6,3))
+                    ax.barh(contrib_df["feature"][::-1], contrib_df["contrib"][::-1])
+                    ax.set_xlabel("Approx. contribution (unitless)")
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.error(f"Explainability fallback failed: {e}")
 
