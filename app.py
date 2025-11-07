@@ -7,11 +7,12 @@ import joblib
 import os
 from datetime import datetime, timezone
 from sklearn.preprocessing import MinMaxScaler
+import shap
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="GitHub Activity Signal", layout="wide")
 st.title("🐙 GitHub Activity Signal — Developer Activeness Analyzer")
 
-# Load artifacts (expected in same folder)
 MODEL_PATH = "activity_best_model.joblib"
 LE_PATH = "label_encoder.joblib"
 
@@ -60,14 +61,11 @@ def extract_features(user, repos):
     pushes = [pd.to_datetime(r.get("pushed_at")) for r in repos if r.get("pushed_at")]
     days_since_recent_push = (now - max(pushes)).days if pushes else 3650
 
-    # computed scores (same logic used in training)
     recency_decay = np.exp(-days_since_recent_push / 90.0)
     pop_followers = np.log1p(followers)
     pop_stars = np.log1p(avg_stars)
 
-    # approximate popularity/signal numbers used during training
-    # (we avoid reusing scalers to keep app lightweight; these are consistent transforms)
-    popularity_score = ( (pop_followers) + (pop_stars) ) * 50.0
+    popularity_score = ((pop_followers) + (pop_stars)) * 50.0
     signal_score = (recency_decay + (repo_count / 100.0) + (avg_forks / 10.0)) * 33.3333
 
     features = pd.DataFrame([{
@@ -106,7 +104,7 @@ if analyze_btn:
         pred = model.predict(features_df)[0]
         pred_label = label_enc.inverse_transform([int(pred)])[0]
         proba = model.predict_proba(features_df)[0]
-        # Show basic info
+
         c1, c2 = st.columns([1,3])
         with c1:
             st.image(user.get("avatar_url",""), width=110)
@@ -116,18 +114,36 @@ if analyze_btn:
             st.write(f"Followers: {raw['followers']} — Public repos: {raw['repo_count']}")
 
         st.metric("Predicted activity", pred_label)
-        # Show probabilities
         probs_df = pd.DataFrame({"label": label_enc.classes_, "probability": np.round(proba,3)})
         st.table(probs_df.sort_values("probability", ascending=False).reset_index(drop=True))
 
-        # Score breakdown
         st.subheader("Score breakdown (approx.)")
         st.write(f"Popularity score (approx): {features_df['popularity_score'].iloc[0]:.1f}")
         st.write(f"Signal score (approx): {features_df['signal_score'].iloc[0]:.1f}")
         st.write(f"Days since last push: {raw['days_since_recent_push']} (recency decay {raw['recency_decay']:.3f})")
 
-        # Recruiter note
         note = (f"{username}: {pred_label} — {raw['repo_count']} repos, "
                 f"{raw['followers']} followers, last push {raw['days_since_recent_push']} days ago.")
         st.text_area("Recruiter note", note, height=90)
         st.download_button("Download note (txt)", note, file_name=f"{username}_note.txt")
+
+        # ---- SHAP explainability section ----
+        show_shap = st.sidebar.checkbox("Show SHAP explainability", value=False)
+        if show_shap:
+            st.subheader("🔍 Model Explainability (SHAP)")
+            try:
+                @st.cache_resource
+                def _get_explainer(m):
+                    try:
+                        return shap.TreeExplainer(m)
+                    except Exception:
+                        return shap.Explainer(m)
+                explainer = _get_explainer(model)
+                shap_values = explainer(features_df)
+                fig, ax = plt.subplots(figsize=(6,3))
+                shap.plots.bar(shap_values[0], show=False, max_display=8)
+                st.pyplot(fig)
+                st.caption("SHAP shows which features influenced the prediction most.")
+            except Exception as e:
+                st.warning(f"Explainability not available: {e}")
+
